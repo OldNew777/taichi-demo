@@ -2,7 +2,7 @@ import taichi as ti
 
 
 def simulate_cloth():
-    ti.init(arch=ti.gpu)
+    ti.init(arch=ti.cpu)
 
     n = 128
     quad_size = 1.0 / n

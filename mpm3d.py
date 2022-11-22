@@ -86,12 +86,8 @@ def mpm3d():
         for i, j, k in ti.ndrange(grid_v.shape[0], grid_v.shape[1], grid_v.shape[2]):
             m_temp = grid_m[i, j, k]
             v_temp = ti.select(m_temp > 0, grid_v[i, j, k] / m_temp, ti.Vector.zero(float, 3))
-            # if m_temp <= 0:
-            #     print(i, j, k, m_temp, '<= 0 =', m_temp > 0, '; v_temp =', v_temp)
             v_temp[1] -= dt * gravity
             index = ti.Vector([i, j, k], dt=int)
-            # if (index < bound).any():
-            #     print(index, '<', bound, '=', index < bound, '; v_temp =', v_temp)
             cond = (index < bound and v_temp < 0.) or (index > n_grids - bound and v_temp > 0.)
             v_temp = ti.select(cond, 0., v_temp)
             grid_v[i, j, k] = v_temp
@@ -116,12 +112,6 @@ def mpm3d():
             x[index] += dt * new_v
             J[index] *= 1. + dt * new_C.trace()
             C[index] = new_C
-
-            base, fx, w = weight_kernel(x[index])
-            gird_index_new = get_grid_index(base)
-            if (gird_index_new != base).any():
-                print('base =', base, '; fx =', fx, '; ', gird_index_new, '!=', base)
-                print('dt =', dt, '; new_v =', new_v, '; new_C =', new_C)
 
     def substep():
         clear_grid()

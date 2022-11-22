@@ -1,8 +1,11 @@
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['TI_VISIBLE_DEVICE'] = '0'
 import taichi as ti
 
 
 def simulate_cloth():
-    ti.init(arch=ti.cpu)
+    ti.init(arch=ti.cuda)
 
     n = 128
     quad_size = 1.0 / n

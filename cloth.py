@@ -1,6 +1,7 @@
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ['TI_VISIBLE_DEVICE'] = '0'
+os.environ['TI_VISIBLE_DEVICES'] = '0'
 import taichi as ti
 
 

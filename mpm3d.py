@@ -9,7 +9,7 @@ def clamp(x, min_val, max_val):
 @ti.data_oriented
 class MPM3DSimulator:
     def __init__(self):
-        ti.init(arch=ti.cpu)
+        ti.init(arch=ti.cuda)
 
         # rendering parameters
         self.resolution = (512, 512)
@@ -121,6 +121,10 @@ class MPM3DSimulator:
         self.simulate_grid()
         self.grid_to_point()
 
+    def step(self):
+        for i in range(self.n_steps):
+            self.substep()
+
     def run(self):
         window = ti.ui.Window('MPM3D', self.resolution, vsync=True)
         canvas = window.get_canvas()
@@ -129,12 +133,9 @@ class MPM3DSimulator:
         camera = ti.ui.Camera()
 
         self.initialize()
-        centers = ti.Vector.field(3, float, self.n_particles)
 
         while window.running:
-            for i in range(self.n_steps):
-                self.substep()
-            centers.copy_from(self.x)
+            self.step()
 
             camera.position(1.5, 0.8, 1.3)
             camera.lookat(0.0, 0.0, 0)
@@ -142,7 +143,7 @@ class MPM3DSimulator:
 
             scene.point_light(pos=(-1.2, 1.2, 2), color=(1, 1, 1))
             scene.ambient_light((0.5, 0.5, 0.5))
-            scene.particles(centers=centers, radius=self.point_radius, color=self.point_color)
+            scene.particles(centers=self.x, radius=self.point_radius, color=self.point_color)
             canvas.scene(scene)
             window.show()
 

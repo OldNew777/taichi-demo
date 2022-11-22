@@ -8,10 +8,10 @@ def clamp(x, min_val, max_val):
 
 
 @ti.func
-def gaussian_random():
+def gaussian_random(sigma: float = 1.0, mu: float = 0.0):
     u1 = ti.random(dtype=float)
     u2 = ti.random(dtype=float)
-    return ti.sqrt(-2 * ti.log(u1)) * ti.cos(2 * np.pi * u2)
+    return sigma * ti.sqrt(-2 * ti.log(u1)) * ti.cos(2 * np.pi * u2) + mu
 
 
 class ParticleStatus(int):
@@ -31,7 +31,13 @@ class MPM3DSimulator:
         self.background_color = (0.2, 0.2, 0.4)
         self.point_color = (0.4, 0.6, 0.6)
         self.point_radius = 0.003
-        self.n_insert_per_step = 2
+
+        self.n_insert_per_step = 3
+        self.radius_insert_last = ti.field(dtype=float, shape=(1, ))
+        self.radius_insert = 0.03
+        self.radius_insert_delta = 0.05
+        self.pos_insert = ti.Vector([0.2, 0.7, 0.7])
+        self.v_init_insert = ti.Vector([0.25, 0.5, -0.2])
 
         # constant physical values for simulation
         self.n_particles = (self.n_grids ** 3) // 2
@@ -71,6 +77,7 @@ class MPM3DSimulator:
         self.J.fill(1.)
         self.C.fill(0.)
         self.status.fill(ParticleStatus.VALID)
+        self.radius_insert_last[0] = 0.
 
     @ti.kernel
     def clear_grid(self):
@@ -133,9 +140,12 @@ class MPM3DSimulator:
         for i in ti.grouped(self.insert_indexes):
             index = self.insert_indexes[i]
             theta = ti.random() * 2 * np.pi
-            r = ti.abs(gaussian_random() * 0.05)
-            self.x[index] = [r * ti.cos(theta) + 0.2, 0.7, r * ti.sin(theta) + 0.2]
-            self.v[index] = [0.1, 0.2, 0.05]
+            r = ti.abs(gaussian_random() * self.radius_insert)
+            while ti.abs(r - self.radius_insert_last[0]) > self.radius_insert_delta:
+                r = ti.abs(gaussian_random() * self.radius_insert)
+            self.radius_insert_last[0] = r
+            self.x[index] = [r * ti.cos(theta), 0., r * ti.sin(theta)] + self.pos_insert
+            self.v[index] = self.v_init_insert
             self.J[index] = 1.
             self.C[index] = ti.Matrix.zero(float, 3, 3)
             self.status[index] = ParticleStatus.VALID

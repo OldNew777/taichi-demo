@@ -37,7 +37,7 @@ class MPM3DSimulator:
         self.radius_insert = 0.03
         self.radius_insert_delta = 0.05
         self.pos_insert = ti.Vector([0.2, 0.7, 0.7])
-        self.v_init_insert = ti.Vector([0.25, 0.5, -0.2])
+        self.v_init_insert = ti.Vector([0.25, -0.5, -0.2])
 
         # constant physical values for simulation
         self.n_particles = (self.n_grids ** 3) // 2

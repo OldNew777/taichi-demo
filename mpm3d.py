@@ -25,22 +25,24 @@ class MPM3DSimulator:
         ti.init(arch=ti.cuda)
 
         # rendering parameters
-        self.resolution = (512, 512)
+        self.resolution = (1024, 1024)
         self.n_steps = 50
         self.n_grids = 64
         self.background_color = (0.2, 0.2, 0.4)
         self.point_color = (0.4, 0.6, 0.6)
         self.point_radius = 0.003
 
-        self.n_insert_per_step = 3
-        self.radius_insert_last = ti.field(dtype=float, shape=(1, ))
+        self.n_insert_per_step = 64
+        self.radius_insert_last = ti.field(dtype=float, shape=(1,))
         self.radius_insert = 0.03
         self.radius_insert_delta = 0.05
-        self.pos_insert = ti.Vector([0.2, 0.7, 0.7])
-        self.v_init_insert = ti.Vector([0.25, -0.5, -0.2])
+        self.pos_insert = ti.Vector([0.2, 0.95, 0.7])
+        self.v_init_insert = ti.Vector([1.5, -5.0, -1.2])
+
+        self.n_particles = (self.n_grids ** 3) // (2 ** 3)
+        self.n_valid = self.n_particles
 
         # constant physical values for simulation
-        self.n_particles = (self.n_grids ** 3) // 2
         self.dx = 1. / self.n_grids
         self.dt = 8e-5
         self.p_rho = 1.
@@ -126,25 +128,28 @@ class MPM3DSimulator:
                 self.C_new[index] = self.C[index]
                 self.status_new[index] = self.status[index]
 
-    @ti.kernel
-    def valid_n(self) -> int:
-        n = ti.int32(0)
-        for i in ti.grouped(self.status):
-            if self.status[i] == ParticleStatus.VALID:
-                ti.atomic_add(n, 1)
-        return int(n)
+    # @ti.kernel
+    # def valid_n(self) -> int:
+    #     n = ti.int32(0)
+    #     for i in ti.grouped(self.status):
+    #         if self.status[i] == ParticleStatus.VALID:
+    #             ti.atomic_add(n, 1)
+    #     return int(n)
 
+    def valid_n(self) -> int:
+        return self.n_valid
 
     @ti.kernel
     def init_added_particles(self):
         for i in ti.grouped(self.insert_indexes):
             index = self.insert_indexes[i]
             theta = ti.random() * 2 * np.pi
-            r = ti.abs(gaussian_random() * self.radius_insert)
-            while ti.abs(r - self.radius_insert_last[0]) > self.radius_insert_delta:
-                r = ti.abs(gaussian_random() * self.radius_insert)
+            x_offset = (ti.random() - 0.5) * self.v_init_insert[1] * self.dt * self.n_steps
+            r = 10000000.
+            while ti.abs(r - self.radius_insert_last[0]) > self.radius_insert_delta or r > self.radius_insert:
+                r = ti.abs(gaussian_random()) * self.radius_insert
             self.radius_insert_last[0] = r
-            self.x[index] = [r * ti.cos(theta), 0., r * ti.sin(theta)] + self.pos_insert
+            self.x[index] = [r * ti.cos(theta), 0., r * ti.sin(theta)] + self.pos_insert + x_offset
             self.v[index] = self.v_init_insert
             self.J[index] = 1.
             self.C[index] = ti.Matrix.zero(float, 3, 3)
@@ -153,7 +158,7 @@ class MPM3DSimulator:
     def add_particles(self):
         n = self.n_insert_per_step
         if self.valid_n() + n > self.n_particles:
-            new_size = self.n_particles + max(n, self.n_particles, 65536)
+            new_size = self.n_particles + max(n, self.n_particles, 1 << 20)
             print(f'Reverse from {self.n_particles} to {new_size}', )
             self.reverse(new_size)
         insert_indexes_np = []
@@ -165,6 +170,7 @@ class MPM3DSimulator:
         insert_indexes_np = np.array(insert_indexes_np)
         self.insert_indexes.from_numpy(insert_indexes_np)
         self.init_added_particles()
+        self.n_valid += self.n_insert_per_step
 
     @ti.func
     def weight_kernel(self, x):
@@ -184,16 +190,14 @@ class MPM3DSimulator:
                 base, fx, w = self.weight_kernel(self.x[index])
                 stress = -4. * self.dt * self.E * self.p_vol * (self.J[index] - 1.) / ti.pow(self.dx, 2)
                 affine = ti.Matrix.diag(3, stress) + self.p_mass * self.C[index]
-                for i in ti.static(range(3)):
-                    for j in ti.static(range(3)):
-                        for k in ti.static(range(3)):
-                            offset = ti.Vector([i, j, k], dt=int)
-                            dpos = (offset.cast(float) - fx) * self.dx
-                            weight = w[i, 0] * w[j, 1] * w[k, 2]
-                            v_add = weight * (self.p_mass * self.v[index] + affine @ dpos)
-                            gird_index_new = self.get_grid_index(base + offset)
-                            ti.atomic_add(self.grid_v[gird_index_new], v_add)
-                            ti.atomic_add(self.grid_m[gird_index_new], weight * self.p_mass)
+                for i, j, k in ti.static(ti.ndrange(3, 3, 3)):
+                    offset = ti.Vector([i, j, k], dt=int)
+                    dpos = (offset.cast(float) - fx) * self.dx
+                    weight = w[i, 0] * w[j, 1] * w[k, 2]
+                    v_add = weight * (self.p_mass * self.v[index] + affine @ dpos)
+                    gird_index_new = self.get_grid_index(base + offset)
+                    ti.atomic_add(self.grid_v[gird_index_new], v_add)
+                    ti.atomic_add(self.grid_m[gird_index_new], weight * self.p_mass)
 
     @ti.kernel
     def simulate_grid(self):
@@ -213,16 +217,14 @@ class MPM3DSimulator:
                 base, fx, w = self.weight_kernel(self.x[index])
                 new_v = ti.Vector.zero(float, 3)
                 new_C = ti.Matrix.zero(float, 3, 3)
-                for i in ti.static(range(3)):
-                    for j in ti.static(range(3)):
-                        for k in ti.static(range(3)):
-                            offset = ti.Vector([i, j, k], dt=int)
-                            dpos = (offset.cast(float) - fx) * self.dx
-                            weight = w[i, 0] * w[j, 1] * w[k, 2]
-                            gird_index_new = self.get_grid_index(base + offset)
-                            g_v = self.grid_v[gird_index_new]
-                            new_v += weight * g_v
-                            new_C += 4. * weight * g_v.outer_product(dpos) / ti.pow(self.dx, 2)
+                for i, j, k in ti.static(ti.ndrange(3, 3, 3)):
+                    offset = ti.Vector([i, j, k], dt=int)
+                    dpos = (offset.cast(float) - fx) * self.dx
+                    weight = w[i, 0] * w[j, 1] * w[k, 2]
+                    gird_index_new = self.get_grid_index(base + offset)
+                    g_v = self.grid_v[gird_index_new]
+                    new_v += weight * g_v
+                    new_C += 4. * weight * g_v.outer_product(dpos) / ti.pow(self.dx, 2)
                 self.v[index] = new_v
                 self.x[index] += self.dt * new_v
                 self.J[index] *= 1. + self.dt * new_C.trace()
@@ -246,18 +248,35 @@ class MPM3DSimulator:
         scene = ti.ui.Scene()
         camera = ti.ui.Camera()
 
+        bounding_box_vertices = ti.Vector.field(n=3, dtype=float, shape=(24,))
+
+        @ti.kernel
+        def init_bounding_box():
+            bound_exact = (self.bound - 0.5) / self.n_grids
+            pos = [bound_exact, 1. - bound_exact]
+            for axis, i, j, k in ti.static(ti.ndrange(3, 2, 2, 2)):
+                index = axis * 8 + i * 4 + j * 2 + k
+                bounding_box_vertices[index][(axis + 0) % 3] = pos[i]
+                bounding_box_vertices[index][(axis + 1) % 3] = pos[j]
+                bounding_box_vertices[index][(axis + 2) % 3] = pos[k]
+
+        init_bounding_box()
+
         self.initialize()
 
         while window.running:
             self.step()
 
-            camera.position(1.5, 0.8, 1.3)
-            camera.lookat(0.0, 0.0, 0)
+            camera.position(2, 0.8, 1.6)
+            camera.lookat(0.0, 0.5, 0)
             scene.set_camera(camera)
 
             scene.point_light(pos=(-1.2, 1.2, 2), color=(1, 1, 1))
             scene.ambient_light((0.5, 0.5, 0.5))
+
             scene.particles(centers=self.x, radius=self.point_radius, color=self.point_color)
+            scene.lines(vertices=bounding_box_vertices, width=0.02, color=(1., 1., 0.))
+
             canvas.scene(scene)
             window.show()
 

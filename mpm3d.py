@@ -5,6 +5,7 @@ import taichi as ti
 import numpy as np
 import mcubes
 import scipy.spatial
+
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 import cv2
 import tqdm
@@ -63,10 +64,10 @@ class MPM3DSimulator:
         self.insert_indexes = ti.field(dtype=int, shape=(self.n_insert_per_step,))
 
         # rendering parameters
-        self.save_frames = False
+        self.save_frames = True
         self.save_obj = False
-        self.save_seconds = 5.0
-        self.frame_rate = 1 / self.dt / self.n_steps
+        self.save_seconds = 10.0
+        self.frame_rate = 1. / self.dt / self.n_steps
         self.resolution = (1024, 1024)
         self.background_color = (0.2, 0.2, 0.4)
         self.point_color = (0.4, 0.6, 0.6)
@@ -74,6 +75,8 @@ class MPM3DSimulator:
         self.reconstruct_threshold = 0.75
         self.reconstruct_resolution = (100, 100, 100)
         self.reconstruct_radius = 0.1
+
+        self.bounding_box_vertices = ti.Vector.field(n=3, dtype=float, shape=(24,))
 
     @ti.func
     def get_grid_index(self, xyz):
@@ -88,6 +91,15 @@ class MPM3DSimulator:
         self.C.fill(0.)
         self.status.fill(ParticleStatus.VALID)
         self.radius_insert_last[0] = 0.
+
+        bound_exact = (self.bound - 0.7) / self.n_grids
+        pos = [bound_exact, 1. - bound_exact]
+        for axis, i, j, k in ti.static(ti.ndrange(3, 2, 2, 2)):
+            index = axis * 8 + i * 4 + j * 2 + k
+            self.bounding_box_vertices[index][(axis + 0) % 3] = pos[i]
+            self.bounding_box_vertices[index][(axis + 1) % 3] = pos[j]
+            self.bounding_box_vertices[index][(axis + 2) % 3] = pos[k]
+
 
     @ti.kernel
     def clear_grid(self):
@@ -261,7 +273,7 @@ class MPM3DSimulator:
 
         # We are picking scalar values at vertices of a cell rather than the center
         # Also, step out one cell's distance to completely include the simulation region
-        f_shape = (resolution[0]+3, resolution[1]+3, resolution[2]+3)
+        f_shape = (resolution[0] + 3, resolution[1] + 3, resolution[2] + 3)
         i, j, k = np.mgrid[:f_shape[0], :f_shape[1], :f_shape[2]] - 1
 
         x = i * dx
@@ -286,7 +298,8 @@ class MPM3DSimulator:
                 for kk in range(resolution[2]):
                     idx = (ii, jj, kk)
                     p1 = np.array([x[idx], y[idx], z[idx]])
-                    p2s = np.array([particle_pos[p2_idx] for p2_idx in particle_indices[idx]]) if particle_indices[idx] else None
+                    p2s = np.array([particle_pos[p2_idx] for p2_idx in particle_indices[idx]]) if particle_indices[
+                        idx] else None
                     f[idx] = metaball_eval(p1, p2s)
         return f
 
@@ -305,35 +318,45 @@ class MPM3DSimulator:
         frames = sorted(f for f in os.listdir(render_output_dir) if f.lower().endswith(".png"))
         video = cv2.VideoWriter(os.path.join(render_output_dir, 'video.mp4'),
                                 cv2.VideoWriter_fourcc('m', 'p', '4', 'v'),
-                                self.frame_rate, self.resolution)
+                                int(self.frame_rate + 0.5), self.resolution)
         for i, frame in enumerate(tqdm.tqdm(frames)):
             frame_image = cv2.imread(os.path.join(render_output_dir, frame), cv2.IMREAD_COLOR)
             video.write(frame_image)
+        video.release()
 
-    def run(self):
+    def render_1spp(self, frame_index, window, scene, camera, canvas, model_output_dir, render_output_dir):
+        self.step()
+
+        camera.position(2, 0.8, 1.6)
+        camera.lookat(0.0, 0.4, 0)
+        scene.set_camera(camera)
+
+        scene.point_light(pos=(-1.2, 1.2, 2), color=(1, 1, 1))
+        scene.ambient_light((0.5, 0.5, 0.5))
+
+        scene.particles(centers=self.x, radius=self.point_radius, color=self.point_color)
+        scene.lines(vertices=self.bounding_box_vertices, width=0.02, color=(1., 1., 0.))
+
+        canvas.scene(scene)
+
+        if self.save_frames and frame_index <= self.save_seconds * self.frame_rate:
+            frame_name = os.path.join(render_output_dir, f'{frame_index:06d}.png')
+            window.save_image(frame_name)
+        if self.save_obj:
+            self.reconstruct_mesh(model_output_dir, frame_index)
+
+        window.show()
+
+    def run(self, seconds=None):
         window = ti.ui.Window('MPM3D', self.resolution, vsync=True)
         canvas = window.get_canvas()
         canvas.set_background_color(self.background_color)
         scene = ti.ui.Scene()
         camera = ti.ui.Camera()
 
-        bounding_box_vertices = ti.Vector.field(n=3, dtype=float, shape=(24,))
-
-        @ti.kernel
-        def init_bounding_box():
-            bound_exact = (self.bound - 0.7) / self.n_grids
-            pos = [bound_exact, 1. - bound_exact]
-            for axis, i, j, k in ti.static(ti.ndrange(3, 2, 2, 2)):
-                index = axis * 8 + i * 4 + j * 2 + k
-                bounding_box_vertices[index][(axis + 0) % 3] = pos[i]
-                bounding_box_vertices[index][(axis + 1) % 3] = pos[j]
-                bounding_box_vertices[index][(axis + 2) % 3] = pos[k]
-
-        init_bounding_box()
         self.initialize()
 
         output_dir = os.path.join(os.path.dirname(__file__), 'mpm3d-outputs')
-        frame_index = 0
 
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
@@ -342,30 +365,17 @@ class MPM3DSimulator:
         os.makedirs(render_output_dir, exist_ok=True)
         os.makedirs(model_output_dir, exist_ok=True)
 
-        while window.running:
-            self.step()
-
-            camera.position(2, 0.8, 1.6)
-            camera.lookat(0.0, 0.4, 0)
-            scene.set_camera(camera)
-
-            scene.point_light(pos=(-1.2, 1.2, 2), color=(1, 1, 1))
-            scene.ambient_light((0.5, 0.5, 0.5))
-
-            scene.particles(centers=self.x, radius=self.point_radius, color=self.point_color)
-            scene.lines(vertices=bounding_box_vertices, width=0.02, color=(1., 1., 0.))
-
-            canvas.scene(scene)
-
-            if self.save_frames and frame_index <= self.save_seconds * self.frame_rate:
-                frame_name = os.path.join(render_output_dir, f'{frame_index:06d}.png')
-                window.save_image(frame_name)
-
-            if self.save_obj:
-                self.reconstruct_mesh(model_output_dir, frame_index)
-
-            window.show()
-            frame_index += 1
+        if seconds is not None:
+            self.save_seconds = seconds
+            for frame_index in tqdm.tqdm(range(int(self.save_seconds * self.frame_rate))):
+                self.render_1spp(frame_index, window, scene, camera, canvas, model_output_dir, render_output_dir)
+        else:
+            frame_index = int(self.save_seconds * self.frame_rate)
+            for frame_index in tqdm.tqdm(range(frame_index)):
+                self.render_1spp(frame_index, window, scene, camera, canvas, model_output_dir, render_output_dir)
+            while window.running:
+                self.render_1spp(frame_index, window, scene, camera, canvas, model_output_dir, render_output_dir)
+                frame_index += 1
 
         if self.save_frames:
             self.frames2mp4(render_output_dir)
@@ -373,4 +383,5 @@ class MPM3DSimulator:
 
 if __name__ == '__main__':
     mpm3d_simulator = MPM3DSimulator()
-    mpm3d_simulator.run()
+    # mpm3d_simulator.run()
+    mpm3d_simulator.frames2mp4('mpm3d-outputs/renders')

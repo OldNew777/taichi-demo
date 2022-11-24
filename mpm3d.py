@@ -54,6 +54,7 @@ class MPM3DSimulator:
         self.v_insert = ti.Vector([1.5, -5.0, -1.2])
 
         self.n_particles = (self.n_grids ** 3) // (2 ** 3)
+        self.n_particles_init = self.n_particles
         self.n_particles_max = max(self.n_particles << 2, 1 << 20)
         print(f'Particles: {self.n_particles}/{self.n_particles_max}')
 
@@ -66,6 +67,7 @@ class MPM3DSimulator:
         self.gravity = 9.8
         self.bound = 3
         self.E = 400.
+        self.rebound_ratio = 0.25
 
         # values for record
         self.x = ti.Vector.field(n=3, dtype=float, shape=(self.n_particles_max,))
@@ -83,8 +85,8 @@ class MPM3DSimulator:
         self.frame_rate = 1. / self.dt / self.n_steps
         self.resolution = (1024, 1024)
         self.background_color = (0.2, 0.2, 0.4)
-        self.point_color = (0.4, 0.6, 0.6)
-        self.point_radius = 0.003
+        self.particles_color = [(0.4, 0.6, 0.6), (0.8, 0.2, 0.2)]
+        self.particles_radius = 0.003
         self.reconstruct_threshold = 0.75
         self.reconstruct_resolution = (100, 100, 100)
         self.reconstruct_radius = 0.1
@@ -94,7 +96,7 @@ class MPM3DSimulator:
         self.n_spheres = 1
         self.sphere_centers = [ti.Vector.field(n=3, dtype=float, shape=(1,)) for _ in range(self.n_spheres)]
         self.sphere_radius = [0.15]
-        self.sphere_colors = [(0.8, 0.2, 0.2)]
+        self.sphere_colors = [(0.6, 0.6, 0.2)]
         self.int_cache = ti.field(dtype=int, shape=(1,))
 
     @ti.func
@@ -143,7 +145,6 @@ class MPM3DSimulator:
 
     @ti.kernel
     def add_particles(self, offset: int, n: int):
-        print('add particles ', offset, n)
         for index in range(offset, offset + n):
             self.status[index] = ParticleStatus.VALID
 
@@ -186,7 +187,7 @@ class MPM3DSimulator:
             # axis aligned bounding box
             grid_index = ti.Vector([i, j, k], dt=int)
             cond = (grid_index < self.bound and v_temp < 0.) or (grid_index > self.n_grids - self.bound and v_temp > 0.)
-            v_temp = ti.select(cond, 0., v_temp)
+            v_temp = ti.select(cond, -self.rebound_ratio * v_temp, v_temp)
 
             # object placed in the space
             for index in ti.static(range(self.n_spheres)):
@@ -196,7 +197,7 @@ class MPM3DSimulator:
                 normal = normal_sphere(grid_x, sphere_center)
                 beta = v_temp.dot(normal)
                 if in_sphere(grid_x, sphere_center, radius) and beta < 0.:
-                    v_temp -= beta * normal
+                    v_temp -= (1. + self.rebound_ratio) * beta * normal
 
             self.grid_v[i, j, k] = v_temp
 
@@ -309,7 +310,11 @@ class MPM3DSimulator:
         scene.point_light(pos=(-1.2, 1.2, 2), color=(1, 1, 1))
         scene.ambient_light((0.5, 0.5, 0.5))
 
-        scene.particles(centers=self.x, radius=self.point_radius, color=self.point_color, index_count=self.n_particles)
+        scene.particles(centers=self.x, radius=self.particles_radius, color=self.particles_color[0],
+                        index_offset=0, index_count=self.n_particles_init)
+        scene.particles(centers=self.x, radius=self.particles_radius, color=self.particles_color[1],
+                        index_offset=self.n_particles_init, index_count=self.n_particles - self.n_particles_init)
+
         scene.lines(vertices=self.bounding_box_vertices, width=0.02, color=(1., 1., 0.))
         for i in range(self.n_spheres):
             scene.particles(centers=self.sphere_centers[i], radius=self.sphere_radius[i], color=self.sphere_colors[i])

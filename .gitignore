@@ -6,3 +6,5 @@ imgui.ini
 *.mp4
 *.png
 mpm3d-outputs/
+
+!intro/*

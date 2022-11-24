@@ -53,6 +53,7 @@ class MPM3DSimulator:
         self.pos_insert = ti.Vector([0.2, 0.9, 0.7])
         self.v_insert = ti.Vector([1.5, -5.0, -1.2])
 
+        # allocate larger space for particles to be inserted
         self.n_particles = (self.n_grids ** 3) // (2 ** 3)
         self.n_particles_init = self.n_particles
         self.n_particles_max = max(self.n_particles << 2, 1 << 20)
@@ -80,7 +81,6 @@ class MPM3DSimulator:
 
         # rendering parameters
         self.save_frames = False
-        self.save_obj = False
         self.save_seconds = 10.0
         self.frame_rate = 1. / self.dt / self.n_steps
         self.resolution = (1024, 1024)
@@ -114,13 +114,16 @@ class MPM3DSimulator:
             self.status[index] = ParticleStatus.VALID
             self.int_cache[0] = 1
             while self.int_cache[0] > 0:
+                # init particles in a smaller cube
                 self.x[index] = [ti.random() * 0.4 + 0.2, ti.random() * 0.4 + 0.2, ti.random() * 0.4 + 0.2]
                 self.int_cache[0] = -1
+                # reject particles in spheres
                 for i in ti.static(range(self.n_spheres)):
                     if in_sphere(self.x[index], self.sphere_centers[i][0], self.sphere_radius[i]):
                         self.int_cache[0] = 1
 
         for index in range(self.n_particles, self.n_particles_max):
+            #  init particles to be added
             theta = ti.random() * 2 * np.pi
             x_offset = (ti.random() - 0.5) * self.v_insert[1] * self.dt * self.n_steps
             r = 10000000.
@@ -130,6 +133,7 @@ class MPM3DSimulator:
             self.v[index] = self.v_insert
             self.status[index] = ParticleStatus.INVALID
 
+        # boundary box
         bound_exact = (self.bound - 0.7) / self.n_grids
         pos = [bound_exact, 1. - bound_exact]
         for axis, i, j, k in ti.static(ti.ndrange(3, 2, 2, 2)):
@@ -146,6 +150,7 @@ class MPM3DSimulator:
     @ti.kernel
     def add_particles(self, offset: int, n: int):
         for index in range(offset, offset + n):
+            # mark particles to be added as VALID
             self.status[index] = ParticleStatus.VALID
 
     @ti.func
@@ -161,6 +166,7 @@ class MPM3DSimulator:
 
     @ti.kernel
     def point_to_grid(self):
+        # transfer particles to grids
         for index in ti.grouped(self.x):
             if self.status[index] == ParticleStatus.VALID:
                 base, fx, w = self.weight_kernel(self.x[index])
@@ -189,7 +195,7 @@ class MPM3DSimulator:
             cond = (grid_index < self.bound and v_temp < 0.) or (grid_index > self.n_grids - self.bound and v_temp > 0.)
             v_temp = ti.select(cond, -self.rebound_ratio * v_temp, v_temp)
 
-            # object placed in the space
+            # bump into objects placed in the space (sphere)
             for index in ti.static(range(self.n_spheres)):
                 sphere_center = self.sphere_centers[index][0]
                 radius = self.sphere_radius[index]
@@ -197,12 +203,14 @@ class MPM3DSimulator:
                 normal = normal_sphere(grid_x, sphere_center)
                 beta = v_temp.dot(normal)
                 if in_sphere(grid_x, sphere_center, radius) and beta < 0.:
+                    # v along normal direction will change
                     v_temp -= (1. + self.rebound_ratio) * beta * normal
 
             self.grid_v[i, j, k] = v_temp
 
     @ti.kernel
     def grid_to_point(self):
+        # transfer grids to particles
         for index in ti.grouped(self.x):
             if self.status[index] == ParticleStatus.VALID:
                 base, fx, w = self.weight_kernel(self.x[index])
@@ -233,57 +241,6 @@ class MPM3DSimulator:
         self.n_particles += n
         for i in range(self.n_steps):
             self.substep()
-
-    def metasphere_scalar_field(self, resolution):
-        dx = self.dx / resolution[0]
-        dy = self.dx / resolution[1]
-        dz = self.dx / resolution[2]
-
-        radius = self.reconstruct_radius
-
-        particle_pos = self.x.to_numpy()
-        kdtree = scipy.spatial.KDTree(particle_pos)
-
-        # We are picking scalar values at vertices of a cell rather than the center
-        # Also, step out one cell's distance to completely include the simulation region
-        f_shape = (resolution[0] + 3, resolution[1] + 3, resolution[2] + 3)
-        i, j, k = np.mgrid[:f_shape[0], :f_shape[1], :f_shape[2]] - 1
-
-        x = i * dx
-        y = j * dy
-        z = k * dz
-        field_pos = np.stack((x, y, z), axis=3)
-        particle_indices = kdtree.query_sphere_point(field_pos, radius, workers=-1)
-
-        f = np.zeros(f_shape)
-
-        def metasphere_eval(p1, p2s):
-            if p2s is None:
-                return 0.0
-            r = np.clip(np.linalg.norm(p1 - p2s, axis=1) / radius, 0.0, 1.0)
-            ans = (1.0 - r ** 3 * (r * (r * 6.0 - 15.0) + 10.0)).sum()
-            print(p1, p2s, ans)
-            exit(0)
-            return ans
-
-        for ii in range(resolution[0]):
-            for jj in range(resolution[1]):
-                for kk in range(resolution[2]):
-                    idx = (ii, jj, kk)
-                    p1 = np.array([x[idx], y[idx], z[idx]])
-                    p2s = np.array([particle_pos[p2_idx] for p2_idx in particle_indices[idx]]) if particle_indices[
-                        idx] else None
-                    f[idx] = metasphere_eval(p1, p2s)
-        return f
-
-    def reconstruct_mesh(self, model_output_dir, frame_index):
-        obj_name = os.path.join(model_output_dir, 'models', f'{frame_index:06d}.obj')
-        print(obj_name)
-        f = self.metasphere_scalar_field(self.reconstruct_resolution)
-        print(f.shape)
-        vertices, faces = mcubes.marching_cubes(f, self.reconstruct_threshold)
-        print(vertices.shape, faces.shape)
-        mcubes.export_obj(vertices, faces, obj_name)
 
     def frames2mp4(self, render_output_dir):
         # Convert frames to mp4 by cv2
@@ -324,15 +281,13 @@ class MPM3DSimulator:
         if self.save_frames and frame_index <= self.save_seconds * self.frame_rate:
             frame_name = os.path.join(render_output_dir, f'{frame_index:06d}.png')
             window.save_image(frame_name)
-        if self.save_obj:
-            self.reconstruct_mesh(model_output_dir, frame_index)
 
     def run(self, seconds=None):
         print('Start initialization')
         self.initialize()
         print('Finish initialization')
 
-        window = ti.ui.Window('MPM3D', self.resolution, vsync=True, show_window=seconds is None)
+        window = ti.ui.Window('MPM3D', self.resolution, vsync=True)
         canvas = window.get_canvas()
         canvas.set_background_color(self.background_color)
         scene = ti.ui.Scene()
@@ -349,7 +304,8 @@ class MPM3DSimulator:
 
         if seconds is not None:
             self.save_seconds = seconds
-            for frame_index in tqdm.tqdm(range(int(self.save_seconds * self.frame_rate))):
+            frame_num = int(self.save_seconds * self.frame_rate)
+            for frame_index in tqdm.tqdm(range(frame_num)):
                 self.render_1spp(frame_index, window, scene, camera, canvas, model_output_dir, render_output_dir)
                 window.show()
         else:
@@ -359,11 +315,14 @@ class MPM3DSimulator:
                 window.show()
                 frame_index += 1
 
+        if window.running:
+            window.destroy()
+
         if self.save_frames:
             self.frames2mp4(render_output_dir)
 
 
 if __name__ == '__main__':
     mpm3d_simulator = MPM3DSimulator()
-    mpm3d_simulator.run()
+    mpm3d_simulator.run(seconds=10.0)
     # mpm3d_simulator.frames2mp4('mpm3d-outputs/renders')

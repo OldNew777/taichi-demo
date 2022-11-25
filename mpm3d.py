@@ -80,7 +80,7 @@ class MPM3DSimulator:
         # rendering parameters
         self.save_frames = False
         self.save_seconds = 10.0
-        self.frame_rate = 1. / self.dt / self.n_steps
+        self.fps = 1. / self.dt / self.n_steps
         self.resolution = (1024, 1024)
         self.background_color = (0.2, 0.2, 0.4)
         self.particles_color = [(0.4, 0.6, 0.6), (0.8, 0.2, 0.2)]
@@ -242,12 +242,16 @@ class MPM3DSimulator:
 
     def frames2mp4(self, render_output_dir):
         # Convert frames to mp4 by cv2
-        print(f'Converting frames to mp4, frame rate: {self.frame_rate}')
+        default_fps = 60
+        frame_every = int(self.fps / default_fps + 0.5)
+        print(f'Converting frames to mp4, FPS: {self.fps}')
         frames = sorted(f for f in os.listdir(render_output_dir) if f.lower().endswith(".png"))
         video = cv2.VideoWriter(os.path.join(render_output_dir, 'video.mp4'),
                                 cv2.VideoWriter_fourcc('m', 'p', '4', 'v'),
-                                int(self.frame_rate + 0.5), self.resolution)
+                                default_fps, self.resolution)
         for i, frame in enumerate(tqdm.tqdm(frames)):
+            if i % frame_every != 0:
+                continue
             frame_image = cv2.imread(os.path.join(render_output_dir, frame), cv2.IMREAD_COLOR)
             assert frame_image.shape[:2] == self.resolution
             video.write(frame_image)
@@ -276,7 +280,7 @@ class MPM3DSimulator:
 
         canvas.scene(scene)
 
-        if self.save_frames and frame_index <= self.save_seconds * self.frame_rate:
+        if self.save_frames and frame_index <= self.save_seconds * self.fps:
             frame_name = os.path.join(render_output_dir, f'{frame_index:06d}.png')
             window.save_image(frame_name)
 
@@ -302,7 +306,7 @@ class MPM3DSimulator:
 
         if seconds is not None:
             self.save_seconds = seconds
-            frame_num = int(self.save_seconds * self.frame_rate)
+            frame_num = int(self.save_seconds * self.fps)
             for frame_index in tqdm.tqdm(range(frame_num)):
                 self.render_1spp(frame_index, window, scene, camera, canvas, model_output_dir, render_output_dir)
                 window.show()
@@ -322,5 +326,5 @@ class MPM3DSimulator:
 
 if __name__ == '__main__':
     mpm3d_simulator = MPM3DSimulator()
-    mpm3d_simulator.run(seconds=10.0)
-    # mpm3d_simulator.frames2mp4('mpm3d-outputs/renders')
+    # mpm3d_simulator.run(seconds=10.0)
+    mpm3d_simulator.frames2mp4('D:/OldNew/LuisaRender/record/mpm3d/v2/renders')
